@@ -4,6 +4,7 @@ import pinecone
 from langchain_community.vectorstores import Pinecone as PineconeVector
 from langchain_community.embeddings import OpenAIEmbeddings
 from pinecone import Pinecone, ServerlessSpec
+from langchain.memory import ConversationBufferMemory
 from llama_cpp import Llama
 from flask_cors import CORS
 import PyPDF2
@@ -221,7 +222,12 @@ def clean_bot_response(text):
     - `response` (str): AI-generated reply based on character personality & memory.
     """
 
+# Initialize LangChain's memory for storing the conversation history
+memory = ConversationBufferMemory(memory_key="history", return_messages=True)
 
+# Function to create context from memory
+def create_context():
+    return memory.buffer
 
 # Endpoint to handle chat messages
 @app.route('/chat', methods=['POST'])
@@ -241,6 +247,12 @@ def chat():
             return jsonify({"error": "Message cannot be empty"}), 400
         if not character:
             return jsonify({"error": "Character not specified"}), 400
+        
+        # Add user input to memory as part of conversation context
+        memory.add_user_message(user_input)
+
+        # Build the prompt from the memory
+        context = create_context()
 
         # Initialize Pinecone index (if used)
         try:
@@ -258,12 +270,21 @@ def chat():
         except Exception as e:
             print(f"Context retrieval warning: {str(e)}")
 
-        prompt = f"""[INST] <<SYS>>
-You are {character}, a character from literature. Respond naturally to the user while staying in character. 
-Do not act as an assistant. Stay in character at all times. 
-<</SYS>>
 
-{user_input} [/INST]"""
+        # Retrieve past conversation context
+        past_messages = memory.load_memory_variables({})["history"]
+
+        prompt = f"""
+        [INST] <<SYS>>
+        You are {character}, a character from literature. Respond naturally while staying in character. 
+        Maintain context from past messages.
+        <</SYS>>
+        
+        Past Conversation: {past_messages}
+
+        User Input: {user_input}
+        [/INST]
+        """
 
         print(f"Sending prompt to model:\n{prompt}")  # Debug logging
 
@@ -278,8 +299,8 @@ Do not act as an assistant. Stay in character at all times.
                 stop=[ "[/INST]"]  # More stop conditions( "<|end_of_text|>", "\n\n", "<<SYS>>""<|eot_id|>" ,)
             )
             
-            # if not response or 'choices' not in response:
-            #     raise ValueError("Empty model response")
+            if not response or 'choices' not in response:
+                raise ValueError("Empty model response")
             
             bot_response = response["choices"][0]["text"].strip() if "choices" in response else response["text"].strip()
 
@@ -291,6 +312,9 @@ Do not act as an assistant. Stay in character at all times.
             # Update emotional states using the global 'emotional_states'
             global emotional_states  # Ensure you're modifying the global variable
             emotional_states = update_emotions(emotional_states, user_input, bot_response)
+
+            # Add bot's response to memory
+            memory.add_ai_message(bot_response)
         
             # Store conversation 
             try:
